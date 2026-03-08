@@ -25,7 +25,7 @@ def base_host(
     base_origin = settings.WEB_URL or settings.APP_BASE_URL
 
     if not base_origin:
-        raise ImproperlyConfigured("APP_BASE_URL or WEB_URL is not set")
+        base_origin = ""
 
     # Admin redirection
     if is_admin:
