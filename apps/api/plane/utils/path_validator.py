@@ -115,7 +115,7 @@ def get_safe_redirect_url(base_url: str, next_path: str = "", params: dict = {})
     validated_path = validate_next_path(next_path)
 
     # Add the next path to the parameters
-    base_url = base_url.rstrip("/") or "/"
+    base_url = base_url.rstrip("/") or "/" or "/"
 
     # Prepare the query parameters
     query_parts = []
