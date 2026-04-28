@@ -5,7 +5,7 @@
 # Python imports
 import json
 
-from django.db.models import F, Func, OuterRef, Q, Subquery
+from django.db.models import Q
 
 # Django Imports
 from django.utils import timezone
@@ -19,14 +19,7 @@ from rest_framework.response import Response
 from plane.app.permissions import allow_permission, ROLE
 from plane.app.serializers import ModuleIssueSerializer
 from plane.bgtasks.issue_activities_task import issue_activity
-from plane.db.models import (
-    Issue,
-    FileAsset,
-    IssueLink,
-    ModuleIssue,
-    Project,
-    CycleIssue,
-)
+from plane.db.models import Issue, ModuleIssue, Project
 from plane.utils.grouper import (
     issue_group_values,
     issue_on_results,
@@ -37,6 +30,7 @@ from plane.utils.order_queryset import order_issue_queryset
 from plane.utils.paginator import GroupedOffsetPaginator, SubGroupedOffsetPaginator
 from plane.utils.filters import ComplexFilterBackend
 from plane.utils.filters import IssueFilterSet
+from ..issue.base import annotate_issue_cycle_and_counts
 from .. import BaseViewSet
 from plane.utils.host import base_host
 
@@ -50,35 +44,7 @@ class ModuleIssueViewSet(BaseViewSet):
     filterset_class = IssueFilterSet
 
     def apply_annotations(self, issues):
-        return (
-            issues.annotate(
-                cycle_id=Subquery(
-                    CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
-                )
-            )
-            .annotate(
-                link_count=IssueLink.objects.filter(issue=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                attachment_count=FileAsset.objects.filter(
-                    issue_id=OuterRef("id"),
-                    entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                )
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                sub_issues_count=Issue.issue_objects.filter(parent=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .prefetch_related("assignees", "labels", "issue_module__module")
-        )
+        return annotate_issue_cycle_and_counts(issues).prefetch_related("assignees", "labels", "issue_module__module")
 
     def get_queryset(self):
         return (

@@ -14,7 +14,7 @@ import type { EPageStoreType } from "@/plane-web/hooks/store";
 // store
 import type { TPageInstance } from "@/store/pages/base-page";
 // local imports
-import { PageOptionsDropdown } from "../editor/toolbar";
+import { PageOptionsDropdown } from "../editor/toolbar/options-dropdown";
 import { PageArchivedBadge } from "./archived-badge";
 import { PageCopyLinkControl } from "./copy-link-control";
 import { PageFavoriteControl } from "./favorite-control";

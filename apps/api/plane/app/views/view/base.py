@@ -6,7 +6,6 @@
 from django.db.models import (
     Exists,
     F,
-    Func,
     OuterRef,
     Q,
     Subquery,
@@ -25,14 +24,11 @@ from plane.app.permissions import allow_permission, ROLE
 from plane.app.serializers import IssueViewSerializer, ViewIssueListSerializer
 from plane.db.models import (
     Issue,
-    FileAsset,
-    IssueLink,
     IssueView,
     Workspace,
     WorkspaceMember,
     ProjectMember,
     Project,
-    CycleIssue,
     UserRecentVisit,
     IssueAssignee,
     IssueLabel,
@@ -45,6 +41,7 @@ from .. import BaseViewSet
 from plane.db.models import UserFavorite
 from plane.utils.filters import ComplexFilterBackend
 from plane.utils.filters import IssueFilterSet
+from ..issue.base import annotate_issue_cycle_and_counts
 
 
 class WorkspaceViewViewSet(BaseViewSet):
@@ -161,32 +158,7 @@ class WorkspaceViewIssuesViewSet(BaseViewSet):
 
     def apply_annotations(self, issues):
         return (
-            issues.annotate(
-                cycle_id=Subquery(
-                    CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
-                )
-            )
-            .annotate(
-                link_count=IssueLink.objects.filter(issue=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                attachment_count=FileAsset.objects.filter(
-                    issue_id=OuterRef("id"),
-                    entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                )
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                sub_issues_count=Issue.issue_objects.filter(parent=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
+            annotate_issue_cycle_and_counts(issues)
             .prefetch_related(
                 Prefetch(
                     "issue_assignee",

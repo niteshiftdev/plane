@@ -22,7 +22,6 @@ from django.db.models import (
     JSONField,
     Value,
     OuterRef,
-    Func,
     CharField,
     Subquery,
 )
@@ -56,18 +55,17 @@ from plane.app.serializers import (
 from plane.db.models import (
     Issue,
     IssueComment,
-    IssueLink,
     IssueReaction,
     ProjectMember,
     CommentReaction,
     DeployBoard,
     IssueVote,
     ProjectPublicMember,
-    FileAsset,
     CycleIssue,
 )
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.utils.issue_filters import issue_filters
+from plane.app.views.issue.base import annotate_issue_cycle_and_counts
 
 
 class ProjectIssuesPublicEndpoint(BaseAPIView):
@@ -85,7 +83,7 @@ class ProjectIssuesPublicEndpoint(BaseAPIView):
         slug = deploy_board.workspace.slug
 
         issue_queryset = (
-            Issue.issue_objects.filter(workspace__slug=slug, project_id=project_id)
+            annotate_issue_cycle_and_counts(Issue.issue_objects.filter(workspace__slug=slug, project_id=project_id))
             .select_related("workspace", "project", "state", "parent")
             .prefetch_related("assignees", "labels", "issue_module__module")
             .prefetch_related(
@@ -95,32 +93,6 @@ class ProjectIssuesPublicEndpoint(BaseAPIView):
                 )
             )
             .prefetch_related(Prefetch("votes", queryset=IssueVote.objects.select_related("actor")))
-            .annotate(
-                cycle_id=Subquery(
-                    CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
-                )
-            )
-            .annotate(
-                link_count=IssueLink.objects.filter(issue=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                attachment_count=FileAsset.objects.filter(
-                    issue_id=OuterRef("id"),
-                    entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                )
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                sub_issues_count=Issue.issue_objects.filter(parent=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
         ).distinct()
 
         issue_queryset = issue_queryset.filter(**filters)

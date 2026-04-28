@@ -12,8 +12,6 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db.models import (
     Count,
     Exists,
-    F,
-    Func,
     OuterRef,
     Prefetch,
     Q,
@@ -50,7 +48,6 @@ from plane.db.models import (
     Issue,
     IssueAssignee,
     IssueLabel,
-    IssueLink,
     IssueReaction,
     IssueRelation,
     IssueSubscriber,
@@ -74,6 +71,23 @@ from plane.utils.paginator import GroupedOffsetPaginator, SubGroupedOffsetPagina
 from plane.utils.timezone_converter import user_timezone_converter
 
 from .. import BaseAPIView, BaseViewSet
+
+
+def annotate_issue_cycle_and_counts(queryset):
+    return (
+        queryset.annotate(
+            cycle_id=Subquery(CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1])
+        )
+        .annotate(link_count=Count("issue_link", distinct=True))
+        .annotate(
+            attachment_count=Count(
+                "assets",
+                filter=Q(assets__entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT),
+                distinct=True,
+            )
+        )
+        .annotate(sub_issues_count=Count("parent_issue", distinct=True))
+    )
 
 
 class IssueListEndpoint(BaseAPIView):
@@ -106,35 +120,7 @@ class IssueListEndpoint(BaseAPIView):
             )
 
         # Add annotations
-        issue_queryset = (
-            issue_queryset.annotate(
-                cycle_id=Subquery(
-                    CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
-                )
-            )
-            .annotate(
-                link_count=IssueLink.objects.filter(issue=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                attachment_count=FileAsset.objects.filter(
-                    issue_id=OuterRef("id"),
-                    entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                )
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                sub_issues_count=Issue.issue_objects.filter(parent=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .distinct()
-        )
+        issue_queryset = annotate_issue_cycle_and_counts(issue_queryset).distinct()
 
         order_by_param = request.GET.get("order_by", "-created_at")
         # Issue queryset
@@ -210,42 +196,7 @@ class IssueViewSet(BaseViewSet):
         return issues
 
     def apply_annotations(self, issues):
-        issues = (
-            issues.annotate(
-                cycle_id=Subquery(
-                    CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
-                )
-            )
-            .annotate(
-                link_count=Subquery(
-                    IssueLink.objects.filter(issue=OuterRef("id"))
-                    .values("issue")
-                    .annotate(count=Count("id"))
-                    .values("count")
-                )
-            )
-            .annotate(
-                attachment_count=Subquery(
-                    FileAsset.objects.filter(
-                        issue_id=OuterRef("id"),
-                        entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                    )
-                    .values("issue_id")
-                    .annotate(count=Count("id"))
-                    .values("count")
-                )
-            )
-            .annotate(
-                sub_issues_count=Subquery(
-                    Issue.issue_objects.filter(parent=OuterRef("id"))
-                    .values("parent")
-                    .annotate(count=Count("id"))
-                    .values("count")
-                )
-            )
-        )
-
-        return issues
+        return annotate_issue_cycle_and_counts(issues)
 
     @method_decorator(gzip_page)
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
@@ -482,40 +433,14 @@ class IssueViewSet(BaseViewSet):
         project = Project.objects.get(pk=project_id, workspace__slug=slug)
 
         issue = (
-            Issue.objects.filter(
-                project_id=self.kwargs.get("project_id"),
-                workspace__slug=self.kwargs.get("slug"),
-                pk=pk,
+            annotate_issue_cycle_and_counts(
+                Issue.objects.filter(
+                    project_id=self.kwargs.get("project_id"),
+                    workspace__slug=self.kwargs.get("slug"),
+                    pk=pk,
+                )
             )
             .select_related("state")
-            .annotate(cycle_id=Subquery(CycleIssue.objects.filter(issue=OuterRef("id")).values("cycle_id")[:1]))
-            .annotate(
-                link_count=Subquery(
-                    IssueLink.objects.filter(issue=OuterRef("id"))
-                    .values("issue")
-                    .annotate(count=Count("id"))
-                    .values("count")
-                )
-            )
-            .annotate(
-                attachment_count=Subquery(
-                    FileAsset.objects.filter(
-                        issue_id=OuterRef("id"),
-                        entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                    )
-                    .values("issue_id")
-                    .annotate(count=Count("id"))
-                    .values("count")
-                )
-            )
-            .annotate(
-                sub_issues_count=Subquery(
-                    Issue.issue_objects.filter(parent=OuterRef("id"))
-                    .values("parent")
-                    .annotate(count=Count("id"))
-                    .values("count")
-                )
-            )
             .annotate(
                 label_ids=Coalesce(
                     Subquery(
@@ -808,37 +733,7 @@ class IssuePaginatedViewSet(BaseViewSet):
 
         issue_queryset = Issue.issue_objects.filter(workspace__slug=workspace_slug, project_id=project_id)
 
-        return (
-            issue_queryset.select_related("state")
-            .annotate(cycle_id=Subquery(CycleIssue.objects.filter(issue=OuterRef("id")).values("cycle_id")[:1]))
-            .annotate(
-                link_count=Subquery(
-                    IssueLink.objects.filter(issue=OuterRef("id"))
-                    .values("issue")
-                    .annotate(count=Count("id"))
-                    .values("count")
-                )
-            )
-            .annotate(
-                attachment_count=Subquery(
-                    FileAsset.objects.filter(
-                        issue_id=OuterRef("id"),
-                        entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                    )
-                    .values("issue_id")
-                    .annotate(count=Count("id"))
-                    .values("count")
-                )
-            )
-            .annotate(
-                sub_issues_count=Subquery(
-                    Issue.issue_objects.filter(parent=OuterRef("id"))
-                    .values("parent")
-                    .annotate(count=Count("id"))
-                    .values("count")
-                )
-            )
-        )
+        return annotate_issue_cycle_and_counts(issue_queryset.select_related("state"))
 
     def process_paginated_result(self, fields, results, timezone):
         paginated_data = results.values(*fields)
@@ -966,32 +861,7 @@ class IssueDetailEndpoint(BaseAPIView):
 
     def apply_annotations(self, issues):
         return (
-            issues.annotate(
-                cycle_id=Subquery(
-                    CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
-                )
-            )
-            .annotate(
-                link_count=IssueLink.objects.filter(issue=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                attachment_count=FileAsset.objects.filter(
-                    issue_id=OuterRef("id"),
-                    entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                )
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                sub_issues_count=Issue.issue_objects.filter(parent=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
+            annotate_issue_cycle_and_counts(issues)
             .prefetch_related(
                 Prefetch(
                     "issue_assignee",
@@ -1220,32 +1090,9 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
 
         # Fetch the issue
         issue = (
-            Issue.objects.filter(project_id=project.id)
-            .filter(workspace__slug=slug)
+            annotate_issue_cycle_and_counts(Issue.objects.filter(project_id=project.id).filter(workspace__slug=slug))
             .select_related("workspace", "project", "state", "parent")
             .prefetch_related("assignees", "labels", "issue_module__module")
-            .annotate(cycle_id=Subquery(CycleIssue.objects.filter(issue=OuterRef("id")).values("cycle_id")[:1]))
-            .annotate(
-                link_count=IssueLink.objects.filter(issue=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                attachment_count=FileAsset.objects.filter(
-                    issue_id=OuterRef("id"),
-                    entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                )
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                sub_issues_count=Issue.issue_objects.filter(parent=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
             .filter(sequence_id=issue_identifier)
             .annotate(
                 label_ids=Coalesce(
