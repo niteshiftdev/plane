@@ -18,7 +18,7 @@ import interThin from "@/app/assets/fonts/inter/thin.ttf?url";
 import interUltraBold from "@/app/assets/fonts/inter/ultrabold.ttf?url";
 import interUltraLight from "@/app/assets/fonts/inter/ultralight.ttf?url";
 // constants
-import { EDITOR_PDF_DOCUMENT_STYLESHEET } from "@/constants/editor";
+import { EDITOR_PDF_DOCUMENT_STYLESHEET } from "@/constants/editor-pdf";
 
 Font.register({
   family: "Inter",

@@ -4,13 +4,12 @@
  * See the LICENSE file for details.
  */
 
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { observer } from "mobx-react";
 import { ArrowUpToLine, Clipboard, History } from "lucide-react";
 // plane imports
 import { TOAST_TYPE, setToast } from "@plane/propel/toast";
 import { ToggleSwitch } from "@plane/ui";
-import { copyTextToClipboard } from "@plane/utils";
 // hooks
 import { useAppRouter } from "@/hooks/use-app-router";
 import { usePageFilters } from "@/hooks/use-page-filters";
@@ -22,8 +21,13 @@ import type { EPageStoreType } from "@/plane-web/hooks/store";
 import type { TPageInstance } from "@/store/pages/base-page";
 // local imports
 import { PageActions } from "../../dropdowns";
-import { ExportPageModal } from "../../modals/export-page-modal";
 import { PAGE_NAVIGATION_PANE_TABS_QUERY_PARAM } from "../../navigation-pane";
+
+const ExportPageModal = lazy(() =>
+  import("../../modals/export-page-modal").then((module) => ({
+    default: module.ExportPageModal,
+  }))
+);
 
 type Props = {
   page: TPageInstance;
@@ -127,12 +131,16 @@ export const PageOptionsDropdown = observer(function PageOptionsDropdown(props: 
 
   return (
     <>
-      <ExportPageModal
-        editorRef={editorRef}
-        isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
-        pageTitle={name ?? ""}
-      />
+      {isExportModalOpen && (
+        <Suspense fallback={null}>
+          <ExportPageModal
+            editorRef={editorRef}
+            isOpen={isExportModalOpen}
+            onClose={() => setIsExportModalOpen(false)}
+            pageTitle={name ?? ""}
+          />
+        </Suspense>
+      )}
       <PageActions
         extraOptions={EXTRA_MENU_OPTIONS}
         optionsOrder={[
