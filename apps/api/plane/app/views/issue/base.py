@@ -3,7 +3,6 @@
 # See the LICENSE file for details.
 
 # Python imports
-import copy
 import json
 
 # Django imports
@@ -269,8 +268,10 @@ class IssueViewSet(BaseViewSet):
         # Apply legacy filters
         issue_queryset = issue_queryset.filter(**filters, **extra_filters)
 
-        # Keeping a copy of the queryset before applying annotations
-        filtered_issue_queryset = copy.deepcopy(issue_queryset)
+        # Keeping a reference to the queryset before applying annotations.
+        # QuerySets are immutable through chaining, so apply_annotations()
+        # returns a new queryset and leaves this one untouched.
+        filtered_issue_queryset = issue_queryset
 
         # Applying annotations to the issue queryset
         issue_queryset = self.apply_annotations(issue_queryset)
@@ -1069,8 +1070,9 @@ class IssueDetailEndpoint(BaseAPIView):
         # Apply legacy filters
         issue = issue.filter(**filters)
 
-        # Total count queryset
-        total_issue_queryset = copy.deepcopy(issue)
+        # Total count queryset (alias before annotations; QuerySet chaining
+        # is immutable so apply_annotations() does not mutate this one).
+        total_issue_queryset = issue
 
         # Applying annotations to the issue queryset
         issue = self.apply_annotations(issue)

@@ -3,7 +3,6 @@
 # See the LICENSE file for details.
 
 # Python imports
-import copy
 from datetime import date
 
 from dateutil.relativedelta import relativedelta
@@ -152,8 +151,9 @@ class WorkspaceUserProfileIssuesEndpoint(BaseAPIView):
         # Apply legacy filters
         issue_queryset = issue_queryset.filter(**filters)
 
-        # Total count queryset
-        total_issue_queryset = copy.deepcopy(issue_queryset)
+        # Total count queryset (alias before annotations; QuerySet chaining
+        # is immutable so apply_annotations() does not mutate this one).
+        total_issue_queryset = issue_queryset
 
         # Apply annotations to the issue queryset
         issue_queryset = self.apply_annotations(issue_queryset)
