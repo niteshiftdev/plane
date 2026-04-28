@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-import copy
-
 # Django imports
 from django.db.models import (
     Exists,
@@ -231,9 +229,10 @@ class WorkspaceViewIssuesViewSet(BaseViewSet):
         # Apply project permission filters to the issue queryset
         issue_queryset = issue_queryset.filter(permission_filters)
 
-        # Base query for the counts
-        total_issue_count_queryset = copy.deepcopy(issue_queryset)
-        total_issue_count_queryset = total_issue_count_queryset.only("id")
+        # Base query for the counts. QuerySet chaining is immutable, so
+        # the subsequent apply_annotations() does not mutate this alias;
+        # .only("id") returns a new queryset.
+        total_issue_count_queryset = issue_queryset.only("id")
 
         # Apply annotations to the issue queryset
         issue_queryset = self.apply_annotations(issue_queryset)
