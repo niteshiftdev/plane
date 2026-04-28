@@ -307,29 +307,21 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
         ):
             serializer = CycleCreateSerializer(data=request.data, context={"request": request})
             if serializer.is_valid():
-                if (
-                    request.data.get("external_id")
-                    and request.data.get("external_source")
-                    and Cycle.objects.filter(
-                        project_id=project_id,
-                        workspace__slug=slug,
-                        external_source=request.data.get("external_source"),
-                        external_id=request.data.get("external_id"),
-                    ).exists()
-                ):
+                if request.data.get("external_id") and request.data.get("external_source"):
                     cycle = Cycle.objects.filter(
                         workspace__slug=slug,
                         project_id=project_id,
                         external_source=request.data.get("external_source"),
                         external_id=request.data.get("external_id"),
                     ).first()
-                    return Response(
-                        {
-                            "error": "Cycle with the same external id and external source already exists",
-                            "id": str(cycle.id),
-                        },
-                        status=status.HTTP_409_CONFLICT,
-                    )
+                    if cycle:
+                        return Response(
+                            {
+                                "error": "Cycle with the same external id and external source already exists",
+                                "id": str(cycle.id),
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
                 serializer.save(project_id=project_id)
                 # Send the model activity
                 model_activity.delay(

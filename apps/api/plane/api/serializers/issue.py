@@ -289,32 +289,19 @@ class IssueSerializer(BaseSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         if "assignees" in self.fields:
+            assignees = instance.assignees.all()
             if "assignees" in self.expand:
                 from .user import UserLiteSerializer
 
-                data["assignees"] = UserLiteSerializer(
-                    User.objects.filter(
-                        pk__in=IssueAssignee.objects.filter(issue=instance).values_list("assignee_id", flat=True)
-                    ),
-                    many=True,
-                ).data
+                data["assignees"] = UserLiteSerializer(assignees, many=True).data
             else:
-                data["assignees"] = [
-                    str(assignee)
-                    for assignee in IssueAssignee.objects.filter(issue=instance).values_list("assignee_id", flat=True)
-                ]
+                data["assignees"] = [str(assignee.id) for assignee in assignees]
         if "labels" in self.fields:
+            labels = instance.labels.all()
             if "labels" in self.expand:
-                data["labels"] = LabelSerializer(
-                    Label.objects.filter(
-                        pk__in=IssueLabel.objects.filter(issue=instance).values_list("label_id", flat=True)
-                    ),
-                    many=True,
-                ).data
+                data["labels"] = LabelSerializer(labels, many=True).data
             else:
-                data["labels"] = [
-                    str(label) for label in IssueLabel.objects.filter(issue=instance).values_list("label_id", flat=True)
-                ]
+                data["labels"] = [str(label.id) for label in labels]
 
         return data
 
