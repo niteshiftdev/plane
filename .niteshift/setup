@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+# Niteshift environment setup for Plane.
+#
+# Finite, idempotent work only: env files, dependencies, package builds and the
+# generated files the declared services need. Everything long-running lives in
+# .niteshift/services.yaml.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+
+# Generated (not committed) files the services run from.
+GENERATED=(
+  "docker-compose.niteshift.yml"
+  "Caddyfile.niteshift"
+  "apps/api/.niteshift-run.sh"
+  "apps/api/.niteshift-bootstrap.sh"
+  "apps/api/.niteshift-seed.py"
+)
+
+# --------------------------------------------------------------- helpers ---
+
+# set_env <file> <key> <value> - replace or append KEY="value"
+set_env() {
+  local file=$1 key=$2 value=$3 tmp
+  tmp="$(mktemp)"
+  grep -vE "^[[:space:]]*${key}=" "$file" >"$tmp" || true
+  printf '%s="%s"\n' "$key" "$value" >>"$tmp"
+  mv "$tmp" "$file"
+}
+
+# get_env <file> <key> - current value with surrounding quotes stripped
+get_env() {
+  local file=$1 key=$2
+  [ -f "$file" ] || return 0
+  sed -nE "s/^[[:space:]]*${key}=[\"']?(.*[^\"'])[\"']?[[:space:]]*$/\1/p" "$file" | tail -1
+}
+
+# preview_url <port> <name> - the browser-facing URL Niteshift published for a port
+preview_url() {
+  local port=$1 name=$2 value
+  value="$(printenv "NITESHIFT_PORT_${port}_URL" 2>/dev/null || true)"
+  [ -n "$value" ] || value="$(printenv "NITESHIFT_${name}_URL" 2>/dev/null || true)"
+  if [ -z "$value" ] && [ -f /.env.setup ]; then
+    value="$(sed -nE "s/^export (NITESHIFT_PORT_${port}_URL|NITESHIFT_${name}_URL)=\"?([^\"]*)\"?$/\2/p" /.env.setup | head -1)"
+  fi
+  printf '%s' "$value"
+}
+
+# ------------------------------------------------------- git housekeeping ---
+
+step "keeping generated files out of git"
+mkdir -p .git/info
+touch .git/info/exclude
+for path in "${GENERATED[@]}"; do
+  grep -qxF "$path" .git/info/exclude || printf '%s\n' "$path" >>.git/info/exclude
+done
+
+# ------------------------------------------------------------- env files ---
+
+step "environment files"
+# The repo ships an .env.example per app; create the .env files once, then keep
+# the sandbox-specific values in sync on every run.
+[ -f .env ] || cp .env.example .env
+for app in api web admin space live; do
+  [ -f "apps/$app/.env" ] || cp "apps/$app/.env.example" "apps/$app/.env"
+done
+
+WEB_PREVIEW_URL="$(preview_url 3000 WEB)"
+ADMIN_PREVIEW_URL="$(preview_url 3001 ADMIN)"
+SPACE_PREVIEW_URL="$(preview_url 3002 SPACE)"
+
+# Everything is served from a single origin by the proxy service, so the browser
+# facing base URLs stay empty and the apps resolve API/admin/space/live relative
+# to whichever origin (localhost or preview URL) served them.
+CORS_ORIGINS="http://localhost:3000,http://localhost:3001,http://localhost:3002"
+for url in "$WEB_PREVIEW_URL" "$ADMIN_PREVIEW_URL" "$SPACE_PREVIEW_URL"; do
+  [ -n "$url" ] && CORS_ORIGINS="$CORS_ORIGINS,${url%/}"
+done
+
+# Shared secret between the API and the live collaboration server.
+LIVE_SECRET="$(get_env apps/api/.env LIVE_SERVER_SECRET_KEY)"
+if [ -z "$LIVE_SECRET" ] || [ "$LIVE_SECRET" = "secret-key" ]; then
+  LIVE_SECRET="$(tr -dc 'a-f0-9' </dev/urandom | head -c 32)"
+fi
+
+# Django needs a stable secret key; generate one the first time only.
+SECRET_KEY="$(get_env apps/api/.env SECRET_KEY)"
+if [ -z "$SECRET_KEY" ]; then
+  SECRET_KEY="$(tr -dc 'a-z0-9' </dev/urandom | head -c 50)"
+fi
+
+# --- API ---------------------------------------------------------------
+set_env apps/api/.env DEBUG 1
+set_env apps/api/.env SECRET_KEY "$SECRET_KEY"
+set_env apps/api/.env CORS_ALLOWED_ORIGINS "$CORS_ORIGINS"
+set_env apps/api/.env POSTGRES_HOST localhost
+set_env apps/api/.env DATABASE_URL "postgresql://plane:plane@localhost:5432/plane"
+set_env apps/api/.env REDIS_HOST localhost
+set_env apps/api/.env REDIS_URL "redis://localhost:6379/"
+set_env apps/api/.env RABBITMQ_HOST localhost
+set_env apps/api/.env USE_MINIO 1
+set_env apps/api/.env AWS_S3_ENDPOINT_URL "http://localhost:9000"
+set_env apps/api/.env LIVE_SERVER_SECRET_KEY "$LIVE_SECRET"
+# Login for previews; override by setting DEV_USER_* in the repository environment.
+set_env apps/api/.env DEV_USER_EMAIL "${DEV_USER_EMAIL:-admin@plane.local}"
+set_env apps/api/.env DEV_USER_PASSWORD "${DEV_USER_PASSWORD:-Pl@ne2024Secure!}"
+for key in WEB_URL APP_BASE_URL ADMIN_BASE_URL SPACE_BASE_URL LIVE_BASE_URL; do
+  set_env apps/api/.env "$key" ""
+done
+
+# --- web / admin / space ----------------------------------------------
+for app in web admin space; do
+  for key in VITE_API_BASE_URL VITE_WEB_BASE_URL VITE_ADMIN_BASE_URL VITE_SPACE_BASE_URL VITE_LIVE_BASE_URL; do
+    set_env "apps/$app/.env" "$key" ""
+  done
+  set_env "apps/$app/.env" VITE_ADMIN_BASE_PATH "/god-mode"
+  set_env "apps/$app/.env" VITE_SPACE_BASE_PATH "/spaces"
+  set_env "apps/$app/.env" VITE_LIVE_BASE_PATH "/live"
+done
+
+# --- live --------------------------------------------------------------
+set_env apps/live/.env PORT 3100
+set_env apps/live/.env API_BASE_URL "http://localhost:8000"
+set_env apps/live/.env WEB_BASE_URL "http://localhost:3000"
+set_env apps/live/.env LIVE_BASE_URL "http://localhost:3100"
+set_env apps/live/.env LIVE_BASE_PATH "/live"
+set_env apps/live/.env LIVE_SERVER_SECRET_KEY "$LIVE_SECRET"
+set_env apps/live/.env REDIS_HOST localhost
+set_env apps/live/.env REDIS_URL "redis://localhost:6379/"
+
+# ----------------------------------------------------------- node & python ---
+
+step "node dependencies"
+corepack enable pnpm >/dev/null 2>&1 || true
+pnpm install --frozen-lockfile
+
+step "shared packages"
+# The apps import @plane/* from dist, so the packages have to exist before the
+# dev servers start. `ns services start packages` keeps them rebuilt after that.
+pnpm turbo run build --filter="./packages/*"
+
+step "python environment"
+[ -d apps/api/.venv ] || python3 -m venv apps/api/.venv
+apps/api/.venv/bin/pip install --quiet --upgrade pip
+apps/api/.venv/bin/pip install --quiet -r apps/api/requirements/local.txt
+
+# --------------------------------------------------------- generated files ---
+
+step "generated service configuration"
+
+# Docker bridge networking is disabled in the sandbox, so the infrastructure
+# containers run on the host network instead of the compose bridge.
+cat >docker-compose.niteshift.yml <<'YAML'
+# Generated by .niteshift/setup - do not edit.
+# Host networking overrides for docker-compose-local.yml: the sandbox runs
+# Docker with --iptables=false, so bridge networking and published ports are
+# unusable. Every container binds directly on the host instead.
+services:
+  plane-db:
+    network_mode: host
+    networks: !reset null
+    ports: !reset null
+  plane-redis:
+    network_mode: host
+    networks: !reset null
+    ports: !reset null
+  plane-mq:
+    network_mode: host
+    networks: !reset null
+  plane-minio:
+    network_mode: host
+    networks: !reset null
+    ports: !reset null
+YAML
+
+# Single-origin reverse proxy, mirroring apps/proxy/Caddyfile.ce (the production
+# topology) with the dev servers' localhost ports.
+cat >Caddyfile.niteshift <<'CADDY'
+# Generated by .niteshift/setup - do not edit.
+{
+	admin off
+	auto_https off
+	servers {
+		trusted_proxies static 0.0.0.0/0
+	}
+}
+
+(plane) {
+	request_body {
+		max_size 25MB
+	}
+
+	# The preview panel embeds the app in an iframe on niteshift.dev.
+	header {
+		defer
+		-X-Frame-Options
+		Content-Security-Policy "frame-ancestors 'self' https://niteshift.dev https://*.niteshift.dev"
+	}
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle /auth/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle /static/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle /uploads/* {
+		reverse_proxy 127.0.0.1:9000
+	}
+	handle /live/* {
+		reverse_proxy 127.0.0.1:3100
+	}
+	redir /god-mode /god-mode/
+	handle /god-mode/* {
+		reverse_proxy 127.0.0.1:3011
+	}
+	redir /spaces /spaces/
+	handle /spaces/* {
+		reverse_proxy 127.0.0.1:3012
+	}
+}
+
+# Web app, and the origin published as the preview URL.
+:3000 {
+	import plane
+	handle {
+		reverse_proxy 127.0.0.1:3010
+	}
+}
+
+# Admin and space keep their own origins for convenience; both serve the whole
+# stack, so a session established on any of them reaches the same API.
+:3001 {
+	import plane
+	redir / /god-mode/
+	handle {
+		reverse_proxy 127.0.0.1:3010
+	}
+}
+
+:3002 {
+	import plane
+	redir / /spaces/
+	handle {
+		reverse_proxy 127.0.0.1:3010
+	}
+}
+CADDY
+
+# Django and Celery read their configuration from the process environment
+# (docker compose does this with env_file), so services run through this wrapper.
+cat >apps/api/.niteshift-run.sh <<'SH'
+#!/usr/bin/env bash
+# Generated by .niteshift/setup - do not edit.
+set -euo pipefail
+cd "$(cd "$(dirname "$0")" && pwd)"
+set -a
+# shellcheck disable=SC1091
+. ./.env
+set +a
+export PATH="$PWD/.venv/bin:$PATH"
+export DJANGO_SETTINGS_MODULE="${DJANGO_SETTINGS_MODULE:-plane.settings.local}"
+
+# The repo's `wait_for_db` command does not actually open a connection, so wait
+# for Postgres here: the infra service may still be starting the container.
+for _ in $(seq 1 90); do
+  (exec 3<>"/dev/tcp/${POSTGRES_HOST:-localhost}/${POSTGRES_PORT:-5432}") 2>/dev/null && break
+  sleep 2
+done
+
+exec "$@"
+SH
+chmod +x apps/api/.niteshift-run.sh
+
+# One-shot database bootstrap, run by the `bootstrap` service once the database
+# is up: the repo's migrator entrypoint, instance registration, and a dev user.
+cat >apps/api/.niteshift-bootstrap.sh <<'SH'
+#!/usr/bin/env bash
+# Generated by .niteshift/setup - do not edit.
+set -euo pipefail
+./bin/docker-entrypoint-migrator.sh
+python manage.py register_instance "niteshift-$(hostname)"
+python manage.py configure_instance
+python manage.py shell <.niteshift-seed.py
+SH
+chmod +x apps/api/.niteshift-bootstrap.sh
+
+cat >apps/api/.niteshift-seed.py <<'PY'
+# Generated by .niteshift/setup - do not edit.
+# Idempotently seeds the dev user so previews have something to log in with.
+import os
+
+from plane.db.models import User
+from plane.license.models import Instance, InstanceAdmin
+
+email = os.environ.get("DEV_USER_EMAIL", "admin@plane.local")
+password = os.environ.get("DEV_USER_PASSWORD", "Pl@ne2024Secure!")
+
+user = User.objects.filter(email=email).first()
+if user is None:
+    user = User(email=email, username=email, display_name=email.split("@")[0])
+
+user.set_password(password)
+user.is_password_autoset = False
+user.is_email_verified = True
+user.is_active = True
+user.save()
+
+instance = Instance.objects.first()
+if instance is not None:
+    InstanceAdmin.objects.get_or_create(user=user, instance=instance, defaults={"role": 20})
+
+print(f"dev user ready: {email}")
+PY
+
+step "setup complete"
+printf 'Plane serves from one origin on port 3000: / (web), /god-mode (admin), /spaces (space), /api + /auth (API), /live (collaboration).\n'
+printf 'Sign in with %s / %s\n' "${DEV_USER_EMAIL:-admin@plane.local}" "${DEV_USER_PASSWORD:-Pl@ne2024Secure!}"

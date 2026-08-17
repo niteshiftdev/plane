@@ -1,0 +1,68 @@
+# Long-running processes for a Plane development sandbox.
+#
+# Everything is reachable from one origin, published on port 3000 by the proxy:
+#   /           web app          (dev server on 3010)
+#   /god-mode   admin app        (dev server on 3011)
+#   /spaces     space app        (dev server on 3012)
+#   /api /auth  Django API       (8000)
+#   /live       collaboration    (3100)
+#   /uploads    MinIO bucket     (9000)
+services:
+  # Postgres, Valkey, RabbitMQ and MinIO from the repo's compose file, with the
+  # host-networking overrides .niteshift/setup generates for the sandbox.
+  - name: infra
+    command: docker compose -f docker-compose-local.yml -f docker-compose.niteshift.yml up plane-db plane-redis plane-mq plane-minio
+    stopGracePeriod: 30s
+
+  # One-shot: migrations, instance registration, dev user. Waits for the database
+  # itself, so it does not need to be ordered after `infra`.
+  - name: bootstrap
+    command: apps/api/.niteshift-run.sh ./.niteshift-bootstrap.sh
+    restart: "no"
+
+  - name: api
+    command: apps/api/.niteshift-run.sh ./bin/docker-entrypoint-api-local.sh
+
+  - name: worker
+    command: apps/api/.niteshift-run.sh ./bin/docker-entrypoint-worker.sh
+
+  - name: beat
+    command: apps/api/.niteshift-run.sh ./bin/docker-entrypoint-beat.sh
+
+  # On demand (`ns services start packages`): rebuilds packages/* on change.
+  # Off by default because tsdown wipes each dist/ before its first rebuild,
+  # which breaks the dev servers already serving from it; .niteshift/setup has
+  # built the packages by the time the apps start.
+  - name: packages
+    command: pnpm turbo run dev --filter="./packages/*" --concurrency=15
+    autostart: false
+
+  - name: web
+    command: pnpm exec react-router dev --port 3010
+    cwd: apps/web
+    environment:
+      - name: __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+        value: .niteshift.dev
+
+  - name: admin
+    command: pnpm exec react-router dev --port 3011
+    cwd: apps/admin
+    environment:
+      - name: __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+        value: .niteshift.dev
+
+  - name: space
+    command: pnpm exec react-router dev --port 3012
+    cwd: apps/space
+    environment:
+      - name: __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+        value: .niteshift.dev
+
+  - name: live
+    command: pnpm run dev
+    cwd: apps/live
+
+  # Single origin for every app, and the published preview.
+  - name: proxy
+    command: caddy run --config Caddyfile.niteshift --adapter caddyfile
+    port: 3000
