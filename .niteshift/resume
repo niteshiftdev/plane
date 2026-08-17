@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Recovery after a sandbox resume, before the declared services are restored.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+# The infra service is a docker compose stack, so the daemon has to be back
+# before it starts. Nothing runs while a sandbox is suspended.
+if ! docker info >/dev/null 2>&1; then
+  echo "==> starting docker"
+  (systemctl start docker || service docker start || true) >/dev/null 2>&1
+  for _ in $(seq 1 30); do
+    docker info >/dev/null 2>&1 && break
+    sleep 2
+  done
+  docker info >/dev/null 2>&1 || echo "docker is still unavailable; the infra service will keep retrying"
+fi
+
+# Refresh generated configuration and environment files (preview URLs, wrapper
+# scripts). Setup is idempotent and cheap once the caches are warm.
+exec "$REPO_ROOT/.niteshift/setup"
