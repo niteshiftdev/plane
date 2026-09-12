@@ -1,0 +1,57 @@
+services:
+  # Single origin for the whole stack, as apps/proxy does in production.
+  - name: proxy
+    command: exec node .niteshift/files/proxy.mjs
+    port: 3000
+    auth:
+      type: cookie-file
+      command: .niteshift/files/dev-auth.sh
+
+  - name: infra
+    command: exec docker compose -f docker-compose-local.yml -f .niteshift/files/docker-compose.niteshift.yml up plane-db plane-redis plane-mq plane-minio
+    stopGracePeriod: 60s
+
+  - name: api
+    cwd: apps/api
+    command: |
+      set -a; . ./.env; set +a
+      # Plane derives CSRF_TRUSTED_ORIGINS from CORS_ALLOWED_ORIGINS, and the
+      # browser's Origin is the preview host while the proxy presents a
+      # localhost Host. Keeping an http:// origin in the list also keeps the
+      # session cookies non-Secure, so localhost stays usable.
+      export CORS_ALLOWED_ORIGINS="http://localhost:3000,${NITESHIFT_PORT_3000_URL:-https://ns-3000-${NITESHIFT_TASK_ID#task_}.preview.niteshift.dev}"
+      exec .venv/bin/python manage.py runserver 0.0.0.0:8000 --settings=plane.settings.local
+
+  - name: worker
+    cwd: apps/api
+    command: |
+      set -a; . ./.env; set +a
+      exec .venv/bin/celery -A plane worker -l info
+    environment:
+      - name: DJANGO_SETTINGS_MODULE
+        value: plane.settings.local
+
+  - name: beat
+    cwd: apps/api
+    command: |
+      set -a; . ./.env; set +a
+      exec .venv/bin/celery -A plane beat -l info
+    environment:
+      - name: DJANGO_SETTINGS_MODULE
+        value: plane.settings.local
+
+  - name: live
+    cwd: apps/live
+    command: exec pnpm dev
+
+  - name: web
+    cwd: apps/web
+    command: exec pnpm exec react-router dev --port 13000
+
+  - name: admin
+    cwd: apps/admin
+    command: exec pnpm exec react-router dev --port 13001
+
+  - name: space
+    cwd: apps/space
+    command: exec pnpm exec react-router dev --port 13002

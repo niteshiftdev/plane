@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# Fresh-sandbox setup for Plane: infrastructure containers, a Python virtualenv
+# for the Django API, node dependencies, and a seeded development instance.
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo"
+
+venv="$repo/apps/api/.venv"
+. .niteshift/files/dev-account.sh
+
+# --- environment files -------------------------------------------------------
+# docker compose reads the root .env; the API, live server and Vite configs each
+# read their own. Every value here is a fixed development default.
+
+cat > .env <<'EOF'
+POSTGRES_USER=plane
+POSTGRES_PASSWORD=plane
+POSTGRES_DB=plane
+PGDATA=/var/lib/postgresql/data
+RABBITMQ_USER=plane
+RABBITMQ_PASSWORD=plane
+RABBITMQ_VHOST=plane
+AWS_ACCESS_KEY_ID=access-key
+AWS_SECRET_ACCESS_KEY=secret-key
+AWS_S3_BUCKET_NAME=uploads
+FILE_SIZE_LIMIT=5242880
+EOF
+
+cat > apps/api/.env <<'EOF'
+DEBUG=1
+SECRET_KEY=niteshift-development-secret-key
+POSTGRES_USER=plane
+POSTGRES_PASSWORD=plane
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=plane
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_URL=redis://localhost:6379/
+RABBITMQ_HOST=localhost
+RABBITMQ_PORT=5672
+RABBITMQ_USER=plane
+RABBITMQ_PASSWORD=plane
+RABBITMQ_VHOST=plane
+USE_MINIO=1
+MINIO_ENDPOINT_SSL=0
+AWS_REGION=
+AWS_ACCESS_KEY_ID=access-key
+AWS_SECRET_ACCESS_KEY=secret-key
+AWS_S3_ENDPOINT_URL=http://localhost:9000
+AWS_S3_BUCKET_NAME=uploads
+FILE_SIZE_LIMIT=5242880
+SIGNED_URL_EXPIRATION=3600
+LIVE_SERVER_SECRET_KEY=niteshift-development-live-secret
+ADMIN_BASE_PATH=/god-mode/
+SPACE_BASE_PATH=/spaces/
+APP_BASE_PATH=/
+LIVE_BASE_PATH=/live/
+API_KEY_RATE_LIMIT=60/minute
+HARD_DELETE_AFTER_DAYS=60
+EOF
+
+# Everything the browser calls is relative to the current origin, so the single
+# proxy on port 3000 routes it and the app works from localhost and the preview
+# domain alike.
+for app in web admin space; do
+  cat > "apps/$app/.env" <<'EOF'
+VITE_API_BASE_URL=
+VITE_WEB_BASE_URL=
+VITE_ADMIN_BASE_URL=
+VITE_ADMIN_BASE_PATH=/god-mode/
+VITE_SPACE_BASE_URL=
+VITE_SPACE_BASE_PATH=/spaces/
+VITE_LIVE_BASE_URL=
+VITE_LIVE_BASE_PATH=/live/
+EOF
+done
+
+cat > apps/live/.env <<'EOF'
+PORT=3100
+API_BASE_URL=http://localhost:8000
+LIVE_BASE_PATH=/live/
+LIVE_SERVER_SECRET_KEY=niteshift-development-live-secret
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_URL=redis://localhost:6379/
+EOF
+
+# --- infrastructure ----------------------------------------------------------
+echo "Starting infrastructure containers..."
+ns services start infra
+timeout 180 bash -c 'until docker compose -f docker-compose-local.yml exec -T plane-db pg_isready -U plane >/dev/null 2>&1; do sleep 2; done'
+timeout 120 bash -c 'until docker compose -f docker-compose-local.yml exec -T plane-redis redis-cli ping 2>/dev/null | grep -q PONG; do sleep 2; done'
+timeout 180 bash -c 'until docker compose -f docker-compose-local.yml exec -T plane-mq rabbitmqctl status >/dev/null 2>&1; do sleep 3; done'
+
+# --- python dependencies -----------------------------------------------------
+if [ ! -x "$venv/bin/python" ]; then
+  echo "Installing build dependencies for the Python packages..."
+  apt-get update -qq
+  apt-get install -y -qq --no-install-recommends libpq-dev gcc python3-dev python3-venv
+  python3 -m venv "$venv"
+fi
+"$venv/bin/pip" install --quiet --no-cache-dir -r apps/api/requirements/local.txt
+
+# --- database and instance ---------------------------------------------------
+set -a
+. apps/api/.env
+set +a
+django() { (cd apps/api && "$venv/bin/python" manage.py "$@" --settings=plane.settings.local); }
+
+echo "Running migrations..."
+django migrate
+django register_instance "$(python3 -c 'import hashlib,os; print(hashlib.sha256(os.urandom(32)).hexdigest())')"
+django configure_instance
+django create_bucket
+
+# --- node dependencies -------------------------------------------------------
+echo "Installing node dependencies..."
+corepack enable pnpm
+pnpm install --frozen-lockfile
+
+# The dev servers import the workspace packages from their build output.
+echo "Building workspace packages..."
+pnpm build --filter='./packages/*'
+
+# --- development instance ----------------------------------------------------
+# Seeded through the app's own endpoints so every signal and default fires.
+echo "Starting the API to seed the development instance..."
+ns services start api
+curl -sf --retry 60 --retry-connrefused --retry-delay 2 -o /dev/null http://localhost:8000/api/instances/
+
+setup_done="$(curl -sf http://localhost:8000/api/instances/ |
+  python3 -c 'import json,sys; print(json.load(sys.stdin).get("instance", {}).get("is_setup_done", False))')"
+
+if [ "$setup_done" = "True" ]; then
+  echo "Instance already seeded."
+else
+  echo "Seeding the development instance..."
+  admin_jar="$(mktemp)"
+  user_jar="$(mktemp)"
+  trap 'rm -f "$admin_jar" "$user_jar"' EXIT
+
+  csrf_token() {
+    curl -sf -c "$1" http://localhost:8000/auth/get-csrf-token/ |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["csrf_token"])'
+  }
+  jar_csrf() { grep csrftoken "$1" | awk '{print $NF}'; }
+
+  csrf="$(csrf_token "$admin_jar")"
+  curl -sf -o /dev/null -b "$admin_jar" -c "$admin_jar" \
+    -X POST http://localhost:8000/api/instances/admins/sign-up/ \
+    -H "X-CSRFToken: $csrf" -H "Referer: http://localhost:8000/" \
+    --data-urlencode "email=$PLANE_DEV_EMAIL" \
+    --data-urlencode "password=$PLANE_DEV_PASSWORD" \
+    --data-urlencode "first_name=$PLANE_DEV_FIRST_NAME" \
+    --data-urlencode "last_name=$PLANE_DEV_LAST_NAME" \
+    --data-urlencode "company_name=$PLANE_DEV_COMPANY"
+
+  curl -sf -o /dev/null -b "$admin_jar" -c "$admin_jar" \
+    -X POST http://localhost:8000/api/instances/workspaces/ \
+    -H "Content-Type: application/json" \
+    -H "X-CSRFToken: $(jar_csrf "$admin_jar")" -H "Referer: http://localhost:8000/" \
+    -d "{\"name\": \"$PLANE_DEV_WORKSPACE_NAME\", \"slug\": \"$PLANE_DEV_WORKSPACE_SLUG\"}"
+
+  # The instance-admin session is separate from an ordinary app session.
+  csrf="$(csrf_token "$user_jar")"
+  curl -sf -o /dev/null -b "$user_jar" -c "$user_jar" \
+    -X POST http://localhost:8000/auth/sign-in/ \
+    -H "X-CSRFToken: $csrf" -H "Referer: http://localhost:8000/" \
+    --data-urlencode "email=$PLANE_DEV_EMAIL" \
+    --data-urlencode "password=$PLANE_DEV_PASSWORD"
+
+  csrf="$(jar_csrf "$user_jar")"
+  curl -sf -o /dev/null -b "$user_jar" \
+    -X POST "http://localhost:8000/api/workspaces/$PLANE_DEV_WORKSPACE_SLUG/projects/" \
+    -H "Content-Type: application/json" \
+    -H "X-CSRFToken: $csrf" -H "Referer: http://localhost:8000/" \
+    -d "{\"name\": \"$PLANE_DEV_PROJECT_NAME\", \"identifier\": \"$PLANE_DEV_PROJECT_IDENTIFIER\", \"network\": 2, \"description\": \"A demo project for development\"}"
+
+  curl -sf -o /dev/null -b "$user_jar" \
+    -X PATCH http://localhost:8000/api/users/me/onboard/ \
+    -H "Content-Type: application/json" \
+    -H "X-CSRFToken: $csrf" -H "Referer: http://localhost:8000/"
+  curl -sf -o /dev/null -b "$user_jar" \
+    -X PATCH http://localhost:8000/api/users/me/profile/ \
+    -H "Content-Type: application/json" \
+    -H "X-CSRFToken: $csrf" -H "Referer: http://localhost:8000/" \
+    -d '{"is_onboarded": true, "is_tour_completed": true}'
+fi
+
+# Vite pre-bundles the workspace dependencies when a dev server starts, so
+# start the three frontends here rather than leaving that cost to the first
+# person to open the preview.
+echo "Starting the frontend dev servers..."
+ns services start web admin space
+for url in http://localhost:13000/ http://localhost:13001/god-mode/ http://localhost:13002/spaces/; do
+  curl -sf --retry 60 --retry-connrefused --retry-delay 5 --max-time 300 -o /dev/null "$url"
+done
+
+echo "Setup complete. Sign in as $PLANE_DEV_EMAIL"

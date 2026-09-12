@@ -23,6 +23,9 @@ def base_host(
     # Calculate the base origin from request
     base_origin = settings.WEB_URL or settings.APP_BASE_URL
 
+    if not base_origin:
+        base_origin = ""
+
     # Admin redirection
     if is_admin:
         admin_base_path = getattr(settings, "ADMIN_BASE_PATH", None)

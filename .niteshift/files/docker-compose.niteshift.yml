@@ -1,0 +1,11 @@
+services:
+  # Publishes the broker ports to the sandbox host: the Celery worker and beat
+  # run natively rather than in the compose network.
+  plane-mq:
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  # minio/minio is no longer published on Docker Hub.
+  plane-minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
